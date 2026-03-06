@@ -1,59 +1,57 @@
-"""Multi-sensor fusion layer — prepared for the next implementation phase.
+"""Multi-sensor Extended Kalman Filter fusion engine.
 
-Architecture overview
----------------------
-Multi-sensor fusion (e.g. GPS + IMU + barometer) works by maintaining a
-*single shared state* and applying one Kalman update per sensor reading
-that arrives at each time step.
+Architecture
+------------
+``SensorFuser`` maintains a single shared state ``[x, y, vx, vy]`` and
+processes a time-ordered stream of measurements from heterogeneous sensors.
 
-The fusion layer owns the predict step and coordinates the update steps:
+The EKF update step is::
 
-    for each time step:
-        fuser.predict(dt)
-        for sensor, measurement in available_measurements:
-            fuser.update(measurement, sensor.observation_matrix)
+    H   = sensor_config.observation_jacobian(x̂)   # linearise at current estimate
+    z̃   = sensor_config.observe(x̂)                # predicted measurement
+    y   = z − z̃                                   # innovation
+    S   = H·P·Hᵀ + R                              # innovation covariance
+    K   = P·Hᵀ·S⁻¹                                # Kalman gain
+    x̂   = x̂ + K·y
+    P   = (I − K·H)·P
 
-This module defines:
+For **linear** sensors (GPS, capture-recapture), ``observation_jacobian``
+returns a constant H and ``observe`` returns ``H @ state``, so the EKF
+reduces to the standard KF exactly.
 
-- ``FusionState`` — the mutable filter state (x, P) shared across sensors.
-- ``SensorFuser`` — orchestrates predict/update for multiple sensors.
-- ``FusedTrajectoryResult`` — output container.
+For **nonlinear** sensors (cell-tower range/angle), the Jacobian is evaluated
+at the current state estimate and the update proceeds identically.
 
-Only ``FusionState`` and ``SensorFuser`` are currently implemented as stubs
-with full docstrings so the design is clear and adding sensors later requires
-only:
-
-1. Subclassing ``SensorConfig`` (already done in ``sensors/``).
-2. Registering it with ``SensorFuser.register_sensor()``.
-3. Feeding its measurements into ``SensorFuser.run()``.
-
-No changes to the state model or Kalman update math are needed.
+When multiple sensors fire at the same timestamp, the predict step runs once
+and then each sensor's update is applied sequentially (equivalent to a joint
+update for zero-correlation sensors).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import groupby
 
 import numpy as np
 import pandas as pd
 
-from ..filters.kalman import VariableNoiseKalmanFilter
 from ..sensors.base import Measurement, SensorConfig
-from ..state.models import StateSpaceModel
+from ..state.models import ConstantVelocity2D, StateSpaceModel
+from .result import FusedTrajectoryResult, FusionStep
 
 
 @dataclass
 class FusionState:
     """Mutable Kalman filter state shared by all sensors.
 
-    Parameters
+    Attributes
     ----------
     x:
-        State vector, shape ``(n_state,)``.
+        State vector ``[x, y, vx, vy]``, shape ``(n_state,)``.
     P:
         State covariance matrix, shape ``(n_state, n_state)``.
     timestamp:
-        Time corresponding to the current state estimate.
+        Time of the most recent update.
     """
 
     x: np.ndarray
@@ -62,6 +60,8 @@ class FusionState:
 
     def predict(self, dt: float, state_model: StateSpaceModel) -> None:
         """Advance the state estimate by *dt* seconds in-place."""
+        if dt <= 0:
+            return
         F = state_model.transition_matrix(dt)
         Q = state_model.process_noise(dt)
         self.x = F @ self.x
@@ -70,98 +70,126 @@ class FusionState:
     def update(
         self,
         z: np.ndarray,
-        H: np.ndarray,
+        sensor_config: SensorConfig,
         R: np.ndarray,
     ) -> np.ndarray:
-        """Apply a single sensor observation in-place.
+        """Apply one EKF measurement update in-place.
 
         Parameters
         ----------
         z:
             Observation vector, shape ``(n_obs,)``.
-        H:
-            Observation matrix, shape ``(n_obs, n_state)``.
+        sensor_config:
+            Provides ``observe()`` and ``observation_jacobian()`` evaluated at
+            the current state estimate ``self.x``.
         R:
-            Observation noise covariance, shape ``(n_obs, n_obs)``.
+            Per-measurement observation noise covariance, shape
+            ``(n_obs, n_obs)``.
 
         Returns
         -------
         innovation:
-            The pre-update residual ``z - H @ x``, shape ``(n_obs,)``.
+            Pre-update residual ``z − h(x̂)``, shape ``(n_obs,)``.
         """
-        y = z - H @ self.x
+        H = sensor_config.observation_jacobian(self.x)   # linearise
+        z_pred = sensor_config.observe(self.x)            # predicted obs
+        y = z - z_pred                                    # innovation
+
+        # Wrap angle innovations into (−π, π] for bearing sensors
+        if z.shape == (1,) and np.abs(y[0]) > np.pi:
+            y[0] = (y[0] + np.pi) % (2 * np.pi) - np.pi
+
         S = H @ self.P @ H.T + R
-        K = self.P @ H.T @ np.linalg.inv(S)
+        K = self.P @ H.T @ np.linalg.solve(S.T, np.eye(S.shape[0])).T
         self.x = self.x + K @ y
-        I = np.eye(len(self.x))
-        self.P = (I - K @ H) @ self.P
+        I_KH = np.eye(len(self.x)) - K @ H
+        self.P = I_KH @ self.P
+
         return y
 
 
 class SensorFuser:
-    """Multi-sensor Kalman fusion orchestrator.
-
-    Maintains a single ``FusionState`` and processes a time-ordered stream of
-    measurements from heterogeneous sensors.
+    """Multi-sensor EKF fusion engine.
 
     Parameters
     ----------
     state_model:
-        Shared state-space model (F, Q).
-    sensors:
-        Mapping from sensor name -> ``SensorConfig``.  Each config provides
-        the observation matrix H for that sensor.
-
-    Usage (future)
-    --------------
-    >>> fuser = SensorFuser(
-    ...     state_model=ConstantVelocity2D(process_noise_std=0.5),
-    ...     sensors={"gps": GPSConfig(...), "imu": IMUConfig(...)},
-    ... )
-    >>> result = fuser.run(measurements_stream)  # list of (Measurement, SensorConfig)
+        Shared state-space model providing ``transition_matrix(dt)`` and
+        ``process_noise(dt)``.
     """
 
-    def __init__(
-        self,
-        state_model: StateSpaceModel,
-        sensors: dict[str, SensorConfig] | None = None,
-    ) -> None:
-        self.state_model = state_model
-        self.sensors: dict[str, SensorConfig] = sensors or {}
+    def __init__(self, state_model: StateSpaceModel | None = None) -> None:
+        self.state_model: StateSpaceModel = state_model or ConstantVelocity2D()
 
-    def register_sensor(self, name: str, config: SensorConfig) -> None:
-        """Add or replace a sensor registration."""
-        self.sensors[name] = config
+    # ------------------------------------------------------------------ #
+    # Public API
+    # ------------------------------------------------------------------ #
 
     def run(
         self,
         measurements: list[tuple[Measurement, SensorConfig]],
         x0: np.ndarray | None = None,
         P0: np.ndarray | None = None,
-    ) -> list[FusionState]:
-        """Process a time-ordered stream of (Measurement, SensorConfig) pairs.
-
-        Each predict step spans the gap to the *next* measurement; each update
-        step applies that measurement.  When two sensors fire at the same
-        timestamp they share the predict step (dt=0 for the second).
+        lat_ref: float = 0.0,
+        lon_ref: float = 0.0,
+    ) -> FusedTrajectoryResult:
+        """Fuse a time-ordered stream of (Measurement, SensorConfig) pairs.
 
         Parameters
         ----------
         measurements:
-            Time-ordered list of ``(Measurement, SensorConfig)`` pairs.
-        x0, P0:
-            Optional override for initial state.
+            Each item is ``(measurement, sensor_config)``.  The list must be
+            sorted by ``measurement.timestamp``.
+        x0:
+            Initial state vector.  Defaults to the first measurement projected
+            into state space with zero velocity.
+        P0:
+            Initial state covariance.  Defaults to large diagonal (high
+            uncertainty).
+        lat_ref, lon_ref:
+            Reference point stored in the result for lat/lon back-projection.
 
         Returns
         -------
-        List of ``FusionState`` snapshots after each update step.
-
-        .. note::
-            This method is a *stub* — the full implementation is coming in the
-            next phase.  The interface is intentionally final so callers can
-            be written now.
+        :class:`~kalmangps.fusion.result.FusedTrajectoryResult`
         """
-        raise NotImplementedError(
-            "Multi-sensor fusion is coming in the next implementation phase. "
-            "Use GPSKalmanPipeline for single-sensor GPS filtering today."
-        )
+        if not measurements:
+            return FusedTrajectoryResult(lat_ref=lat_ref, lon_ref=lon_ref)
+
+        # Sort defensively
+        measurements = sorted(measurements, key=lambda t: t[0].timestamp)
+
+        # Initialise state
+        first_meas, _ = measurements[0]
+        if x0 is None or P0 is None:
+            x0_default, P0_default = self.state_model.initial_state(first_meas.values)
+            x0 = x0 if x0 is not None else x0_default
+            P0 = P0 if P0 is not None else P0_default
+
+        state = FusionState(x=x0.copy(), P=P0.copy(), timestamp=first_meas.timestamp)
+        steps: list[FusionStep] = []
+
+        # Group by timestamp so sensors firing simultaneously share one predict
+        for ts, group_iter in groupby(measurements, key=lambda t: t[0].timestamp):
+            group = list(group_iter)
+
+            # Predict to this timestamp
+            dt = (ts - state.timestamp).total_seconds()
+            state.predict(dt, self.state_model)
+
+            # Sequential EKF update for each sensor at this timestamp
+            for meas, cfg in group:
+                innovation = state.update(meas.values, cfg, meas.covariance)
+                steps.append(
+                    FusionStep(
+                        timestamp=ts,
+                        state_mean=state.x.copy(),
+                        state_cov=state.P.copy(),
+                        sensor_type=meas.sensor_type,
+                        innovation=innovation,
+                    )
+                )
+
+            state.timestamp = ts
+
+        return FusedTrajectoryResult(steps=steps, lat_ref=lat_ref, lon_ref=lon_ref)

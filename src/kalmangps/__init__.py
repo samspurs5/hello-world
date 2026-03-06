@@ -21,21 +21,54 @@ Quick start
 """
 
 from .filters import KalmanFilterResult, VariableNoiseKalmanFilter
-from .fusion import FusionState, SensorFuser
-from .pipeline import GPSKalmanPipeline, PipelineResult, SegmentResult, TrajectorySegment, TrajectorySplitter
-from .sensors import GPSConfig, GPSMeasurement, Measurement, SensorConfig
+from .fusion import (
+    FusedPipelineResult,
+    FusedSegmentResult,
+    FusedTrajectoryResult,
+    FusionState,
+    FusionStep,
+    SensorFuser,
+)
+from .pipeline import (
+    GPSKalmanPipeline,
+    PipelineResult,
+    SegmentResult,
+    SensorFusionPipeline,
+    TrajectorySegment,
+    TrajectorySplitter,
+)
+from .sensors import (
+    CaptureRecaptureConfig,
+    CaptureRecaptureMeasurement,
+    CellTowerConfig,
+    CellTowerMeasurement,
+    CustomMeasurement,
+    CustomSensorConfig,
+    GPSConfig,
+    GPSMeasurement,
+    Measurement,
+    SensorConfig,
+)
 from .state import ConstantVelocity2D, StateSpaceModel
 
 __all__ = [
-    # Pipeline
+    # Single-sensor pipeline
     "GPSKalmanPipeline",
     "PipelineResult",
     "SegmentResult",
     "TrajectorySplitter",
     "TrajectorySegment",
+    # Multi-sensor fusion pipeline
+    "SensorFusionPipeline",
     # Sensors
     "GPSConfig",
     "GPSMeasurement",
+    "CaptureRecaptureConfig",
+    "CaptureRecaptureMeasurement",
+    "CellTowerConfig",
+    "CellTowerMeasurement",
+    "CustomSensorConfig",
+    "CustomMeasurement",
     "Measurement",
     "SensorConfig",
     # State models
@@ -44,9 +77,13 @@ __all__ = [
     # Filters
     "VariableNoiseKalmanFilter",
     "KalmanFilterResult",
-    # Fusion (next phase)
+    # Fusion engine + results
     "SensorFuser",
     "FusionState",
+    "FusionStep",
+    "FusedTrajectoryResult",
+    "FusedSegmentResult",
+    "FusedPipelineResult",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -151,6 +151,11 @@ class GPSConfig(SensorConfig):
     # Batch helpers
     # ------------------------------------------------------------------ #
 
+    def set_reference(self, lat_ref: float, lon_ref: float) -> None:
+        """Set the Cartesian projection reference point for this segment."""
+        self.lat_ref = lat_ref
+        self.lon_ref = lon_ref
+
     def measurements_from_df(
         self, df: pd.DataFrame, *, auto_ref: bool = True
     ) -> list[GPSMeasurement]:
