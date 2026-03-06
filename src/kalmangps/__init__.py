@@ -1,23 +1,41 @@
-"""kalmangps — Kalman filter pipeline for GPS trajectories.
+"""kalmangps — Kalman filter pipeline for GPS trajectories with multi-sensor fusion.
 
-Quick start
------------
+Quick start — single-sensor GPS
+--------------------------------
 >>> import pandas as pd
 >>> from kalmangps import GPSKalmanPipeline, GPSConfig
 >>>
->>> df = pd.read_csv("gps_log.csv")
 >>> pipeline = GPSKalmanPipeline(
-...     gps_config=GPSConfig(
-...         lat_col="lat",
-...         lon_col="lon",
-...         accuracy_col="h_accuracy",   # per-fix accuracy in metres
-...         timestamp_col="utc_time",
-...     ),
-...     group_col="trip_id",             # split by this column first
-...     max_time_gap="5 min",            # then split on time gaps > 5 min
+...     gps_config=GPSConfig(lat_col="lat", lon_col="lon",
+...                          accuracy_col="h_accuracy",
+...                          timestamp_col="utc_time"),
+...     group_col="trip_id",
+...     max_time_gap="5 min",
 ... )
 >>> result = pipeline.run(df)
->>> smoothed = result.to_dataframe()    # filtered_lat, filtered_lon, …
+>>> smoothed = result.to_dataframe()
+
+Quick start — multi-sensor fusion
+-----------------------------------
+>>> from kalmangps import SensorFusionPipeline, GPSConfig, SensorFactory
+>>>
+>>> pipeline = SensorFusionPipeline(
+...     sensors={
+...         "gps": GPSConfig(),
+...         "entrance_cam": SensorFactory.fixed_point(
+...             lat=51.5074, lon=-0.1278, uncertainty_m=20.0,
+...             confidence_col="score",
+...         ),
+...         "tower_A": SensorFactory.range_sensor(
+...             lat=51.501, lon=-0.090, range_std_m=300.0,
+...         ),
+...     },
+...     primary_sensor="gps",
+...     group_col="trip_id",
+... )
+>>> result = pipeline.run(primary_df=gps_df,
+...                       secondary_dfs={"entrance_cam": cam_df, "tower_A": cell_df})
+>>> df = result.to_dataframe()
 """
 
 from .filters import KalmanFilterResult, VariableNoiseKalmanFilter
@@ -38,16 +56,18 @@ from .pipeline import (
     TrajectorySplitter,
 )
 from .sensors import (
-    CaptureRecaptureConfig,
-    CaptureRecaptureMeasurement,
-    CellTowerConfig,
-    CellTowerMeasurement,
-    CustomMeasurement,
-    CustomSensorConfig,
+    BearingModel,
+    CallableModel,
+    FixedPointModel,
+    GenericMeasurement,
+    GenericSensorConfig,
     GPSConfig,
     GPSMeasurement,
     Measurement,
+    ObservationModel,
+    RangeModel,
     SensorConfig,
+    SensorFactory,
 )
 from .state import ConstantVelocity2D, StateSpaceModel
 
@@ -60,15 +80,20 @@ __all__ = [
     "TrajectorySegment",
     # Multi-sensor fusion pipeline
     "SensorFusionPipeline",
-    # Sensors
+    # GPS (primary sensor)
     "GPSConfig",
     "GPSMeasurement",
-    "CaptureRecaptureConfig",
-    "CaptureRecaptureMeasurement",
-    "CellTowerConfig",
-    "CellTowerMeasurement",
-    "CustomSensorConfig",
-    "CustomMeasurement",
+    # Secondary sensors — use SensorFactory to create them
+    "SensorFactory",
+    "GenericSensorConfig",
+    "GenericMeasurement",
+    # Observation models (composable math)
+    "ObservationModel",
+    "FixedPointModel",
+    "RangeModel",
+    "BearingModel",
+    "CallableModel",
+    # Core abstractions
     "Measurement",
     "SensorConfig",
     # State models
@@ -86,4 +111,4 @@ __all__ = [
     "FusedPipelineResult",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

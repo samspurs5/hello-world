@@ -1,5 +1,5 @@
-"""Tests for multi-sensor fusion: SensorFuser, SensorFusionPipeline,
-and all new sensor types."""
+"""Tests for multi-sensor fusion: models, SensorFactory, SensorFuser,
+and SensorFusionPipeline."""
 
 from __future__ import annotations
 
@@ -10,29 +10,26 @@ import pandas as pd
 import pytest
 
 from kalmangps import (
-    CaptureRecaptureConfig,
-    CellTowerConfig,
+    BearingModel,
+    CallableModel,
     ConstantVelocity2D,
-    CustomSensorConfig,
+    FixedPointModel,
     FusedPipelineResult,
     GPSConfig,
+    GenericSensorConfig,
+    RangeModel,
+    SensorFactory,
     SensorFuser,
     SensorFusionPipeline,
 )
 from kalmangps.sensors.gps import latlon_to_xy
 from tests.conftest import make_gps_df
 
-
-# --------------------------------------------------------------------------- #
-# Helpers
-# --------------------------------------------------------------------------- #
-
 LAT_REF = 51.5
 LON_REF = -0.1
 
 
 def _gps_stream(n=15, rng_seed=0):
-    """Return (measurements, config) for a short GPS trajectory."""
     rng = np.random.default_rng(rng_seed)
     df = make_gps_df(n=n, rng=rng)
     cfg = GPSConfig(lat_ref=None, lon_ref=None)
@@ -40,281 +37,284 @@ def _gps_stream(n=15, rng_seed=0):
     return meas, cfg
 
 
-def _capture_recapture_event(ts: pd.Timestamp, cfg: CaptureRecaptureConfig):
-    """Return a single CR measurement using an already-configured config."""
-    row = pd.Series({"timestamp": ts})
-    return cfg.measurement_from_row(row)
-
-
 # --------------------------------------------------------------------------- #
-# CaptureRecaptureConfig
+# ObservationModel — FixedPointModel
 # --------------------------------------------------------------------------- #
 
-class TestCaptureRecaptureConfig:
+class TestFixedPointModel:
 
-    def test_set_reference_required(self):
-        cfg = CaptureRecaptureConfig(reader_lat=51.5, reader_lon=-0.1)
-        row = pd.Series({"timestamp": pd.Timestamp("2024-01-01", tz="UTC")})
+    def _model(self, **kw):
+        m = FixedPointModel(lat=LAT_REF, lon=LON_REF, **kw)
+        m.set_reference(LAT_REF, LON_REF)
+        return m
+
+    def test_requires_set_reference(self):
+        m = FixedPointModel(lat=LAT_REF, lon=LON_REF)
         with pytest.raises(RuntimeError, match="set_reference"):
-            cfg.measurement_from_row(row)
+            m.default_values()
 
-    def test_measurement_at_reader_location(self):
-        cfg = CaptureRecaptureConfig(reader_lat=51.5, reader_lon=-0.1,
-                                      detection_radius_m=20.0)
-        cfg.set_reference(51.5, -0.1)
-        row = pd.Series({"timestamp": pd.Timestamp("2024-01-01", tz="UTC")})
-        m = cfg.measurement_from_row(row)
-        # Reader is at the reference point → Cartesian (0, 0)
-        assert m.values[0] == pytest.approx(0.0, abs=1e-6)
-        assert m.values[1] == pytest.approx(0.0, abs=1e-6)
+    def test_default_values_at_origin(self):
+        m = self._model()
+        v = m.default_values()
+        assert v[0] == pytest.approx(0.0, abs=1e-6)
+        assert v[1] == pytest.approx(0.0, abs=1e-6)
 
-    def test_covariance_is_radius_squared(self):
-        cfg = CaptureRecaptureConfig(reader_lat=51.5, reader_lon=-0.1,
-                                      detection_radius_m=30.0)
-        cfg.set_reference(51.5, -0.1)
-        row = pd.Series({"timestamp": pd.Timestamp("2024-01-01", tz="UTC")})
-        m = cfg.measurement_from_row(row)
-        assert m.covariance[0, 0] == pytest.approx(900.0)
+    def test_observe_returns_state_xy(self):
+        m = self._model()
+        state = np.array([42.0, 17.0, 1.0, 0.5])
+        z = m.observe(state)
+        # h(x) = H @ x = [x, y]
+        assert z[0] == pytest.approx(42.0)
+        assert z[1] == pytest.approx(17.0)
 
-    def test_confidence_scales_radius(self):
-        cfg = CaptureRecaptureConfig(
-            reader_lat=51.5, reader_lon=-0.1,
-            detection_radius_m=50.0, confidence_col="conf"
-        )
-        cfg.set_reference(51.5, -0.1)
-        high_conf = pd.Series({
-            "timestamp": pd.Timestamp("2024-01-01", tz="UTC"), "conf": 1.0
-        })
-        low_conf = pd.Series({
-            "timestamp": pd.Timestamp("2024-01-01", tz="UTC"), "conf": 0.5
-        })
-        m_high = cfg.measurement_from_row(high_conf)
-        m_low = cfg.measurement_from_row(low_conf)
-        # Lower confidence → larger effective radius → larger covariance
-        assert m_low.covariance[0, 0] > m_high.covariance[0, 0]
+    def test_jacobian_is_constant(self):
+        m = self._model()
+        H1 = m.jacobian(np.zeros(4))
+        H2 = m.jacobian(np.array([100.0, 200.0, 1.0, 0.0]))
+        np.testing.assert_array_equal(H1, H2)
+        assert H1.shape == (2, 4)
 
-    def test_observation_matrix_shape(self):
-        cfg = CaptureRecaptureConfig(reader_lat=51.5, reader_lon=-0.1)
-        assert cfg.observation_matrix.shape == (2, 4)
+    def test_covariance_radius_squared(self):
+        m = self._model(uncertainty_m=30.0)
+        cov = m.default_covariance(pd.Series({}))
+        assert cov[0, 0] == pytest.approx(900.0)
 
-    def test_sensor_type(self):
-        cfg = CaptureRecaptureConfig(reader_lat=51.5, reader_lon=-0.1)
-        cfg.set_reference(51.5, -0.1)
-        row = pd.Series({"timestamp": pd.Timestamp("2024-01-01", tz="UTC")})
-        m = cfg.measurement_from_row(row)
-        assert m.sensor_type == "capture_recapture"
+    def test_confidence_scales_covariance(self):
+        m = FixedPointModel(lat=LAT_REF, lon=LON_REF,
+                            uncertainty_m=50.0, confidence_col="conf")
+        m.set_reference(LAT_REF, LON_REF)
+        high = m.default_covariance(pd.Series({"conf": 1.0}))
+        low  = m.default_covariance(pd.Series({"conf": 0.5}))
+        assert low[0, 0] > high[0, 0]
 
-    def test_observe_and_jacobian_linear(self):
-        cfg = CaptureRecaptureConfig(reader_lat=51.5, reader_lon=-0.1)
-        state = np.array([100.0, 200.0, 1.0, 0.5])
-        z = cfg.observe(state)
-        H = cfg.observation_jacobian(state)
-        assert np.allclose(z, H @ state)
+    def test_n_obs(self):
+        assert self._model().n_obs == 2
 
 
 # --------------------------------------------------------------------------- #
-# CellTowerConfig — range
+# ObservationModel — RangeModel
 # --------------------------------------------------------------------------- #
 
-class TestCellTowerConfigRange:
+class TestRangeModel:
 
-    def _cfg(self, **kw):
-        cfg = CellTowerConfig(
-            tower_lat=51.5, tower_lon=-0.1,
-            measurement_type="range",
-            range_std_m=200.0,
-            **kw,
-        )
-        cfg.set_reference(51.5, -0.1)
-        return cfg
+    def _model(self, **kw):
+        m = RangeModel(lat=LAT_REF, lon=LON_REF, **kw)
+        m.set_reference(LAT_REF, LON_REF)
+        return m
 
-    def test_set_reference_required(self):
-        cfg = CellTowerConfig(tower_lat=51.5, tower_lon=-0.1)
-        state = np.array([0.0, 0.0, 0.0, 0.0])
+    def test_requires_set_reference(self):
+        m = RangeModel(lat=LAT_REF, lon=LON_REF)
         with pytest.raises(RuntimeError):
-            cfg.observe(state)
+            m.observe(np.zeros(4))
 
-    def test_observe_range_zero_at_tower(self):
-        cfg = self._cfg()
-        state = np.array([0.0, 0.0, 0.0, 0.0])  # entity at tower
-        z = cfg.observe(state)
-        # Should return min_range_m (not zero) due to guard
-        assert z[0] >= cfg.min_range_m
-
-    def test_observe_range_correct_distance(self):
-        cfg = self._cfg()
-        # Entity 300 m east of the tower (which is at Cartesian origin)
+    def test_range_correct_distance(self):
+        m = self._model()
         state = np.array([300.0, 0.0, 0.0, 0.0])
-        z = cfg.observe(state)
-        assert z[0] == pytest.approx(300.0, rel=1e-6)
+        assert m.observe(state)[0] == pytest.approx(300.0, rel=1e-6)
+
+    def test_range_clamps_at_min(self):
+        m = self._model(min_range_m=10.0)
+        state = np.zeros(4)  # entity at node
+        assert m.observe(state)[0] >= 10.0
 
     def test_jacobian_shape(self):
-        cfg = self._cfg()
-        state = np.array([300.0, 400.0, 0.0, 0.0])
-        H = cfg.observation_jacobian(state)
-        assert H.shape == (1, 4)
+        m = self._model()
+        assert m.jacobian(np.array([300.0, 400.0, 0.0, 0.0])).shape == (1, 4)
 
     def test_jacobian_matches_numerical(self):
-        cfg = self._cfg()
+        m = self._model()
         state = np.array([300.0, 400.0, 1.0, -0.5])
-        H_analytic = cfg.observation_jacobian(state)
-
+        H_a = m.jacobian(state)
         eps = 1e-4
-        H_numeric = np.zeros((1, 4))
+        H_n = np.zeros((1, 4))
         for j in range(4):
             sp, sm = state.copy(), state.copy()
             sp[j] += eps; sm[j] -= eps
-            H_numeric[0, j] = (cfg.observe(sp)[0] - cfg.observe(sm)[0]) / (2 * eps)
+            H_n[0, j] = (m.observe(sp)[0] - m.observe(sm)[0]) / (2 * eps)
+        np.testing.assert_allclose(H_a, H_n, atol=1e-5)
 
-        np.testing.assert_allclose(H_analytic, H_numeric, atol=1e-5)
+    def test_rssi_to_range(self):
+        m = self._model(rssi_at_1m=-40.0, path_loss_exponent=2.0)
+        # RSSI = -40 - 20*log10(10) = -60 dBm → 10 m
+        assert m.rssi_to_range(-60.0) == pytest.approx(10.0, rel=0.01)
 
-    def test_rssi_to_range_conversion(self):
-        cfg = self._cfg(rssi_at_1m=-40.0, path_loss_exponent=2.0)
-        # At 10 m: RSSI = -40 - 20*log10(10) = -60 dBm
-        row = pd.Series({
-            "timestamp": pd.Timestamp("2024-01-01", tz="UTC"),
-            "rssi_dbm": -60.0,
-        })
-        m = cfg.measurement_from_row(row)
-        assert m.values[0] == pytest.approx(10.0, rel=0.01)
-
-    def test_explicit_range_col_takes_priority(self):
-        cfg = self._cfg(range_col="range_m")
-        row = pd.Series({
-            "timestamp": pd.Timestamp("2024-01-01", tz="UTC"),
-            "rssi_dbm": -90.0,  # would give a large distance
-            "range_m": 150.0,
-        })
-        m = cfg.measurement_from_row(row)
-        assert m.values[0] == pytest.approx(150.0)
-
-    def test_observation_matrix_is_none(self):
-        cfg = self._cfg()
-        assert cfg.observation_matrix is None
+    def test_n_obs(self):
+        assert self._model().n_obs == 1
 
 
 # --------------------------------------------------------------------------- #
-# CellTowerConfig — angle
+# ObservationModel — BearingModel
 # --------------------------------------------------------------------------- #
 
-class TestCellTowerConfigAngle:
+class TestBearingModel:
 
-    def _cfg(self):
-        cfg = CellTowerConfig(
-            tower_lat=51.5, tower_lon=-0.1,
-            measurement_type="angle",
-            angle_std_rad=0.1,
-            angle_col="bearing_rad",
-        )
-        cfg.set_reference(51.5, -0.1)
-        return cfg
+    def _model(self, **kw):
+        m = BearingModel(lat=LAT_REF, lon=LON_REF, **kw)
+        m.set_reference(LAT_REF, LON_REF)
+        return m
 
-    def test_observe_angle_correct(self):
-        cfg = self._cfg()
-        # Entity 100 m north, tower at origin → bearing should be pi/2
+    def test_bearing_correct(self):
+        m = self._model()
+        # entity 100 m north of node → bearing = atan2(0-100, 0-0) = -pi/2
         state = np.array([0.0, 100.0, 0.0, 0.0])
-        z = cfg.observe(state)
-        # atan2(0 - 100, 0 - 0) = atan2(-100, 0) = -pi/2
-        expected = math.atan2(cfg._tower_y_m - state[1], cfg._tower_x_m - state[0])
-        assert z[0] == pytest.approx(expected, abs=1e-8)
+        expected = math.atan2(m._y_m - state[1], m._x_m - state[0])
+        assert m.observe(state)[0] == pytest.approx(expected, abs=1e-8)
 
     def test_jacobian_matches_numerical(self):
-        cfg = self._cfg()
+        m = self._model()
         state = np.array([200.0, 150.0, 1.0, 0.5])
-        H_analytic = cfg.observation_jacobian(state)
-
+        H_a = m.jacobian(state)
         eps = 1e-4
-        H_numeric = np.zeros((1, 4))
+        H_n = np.zeros((1, 4))
         for j in range(4):
             sp, sm = state.copy(), state.copy()
             sp[j] += eps; sm[j] -= eps
-            H_numeric[0, j] = (cfg.observe(sp)[0] - cfg.observe(sm)[0]) / (2 * eps)
+            H_n[0, j] = (m.observe(sp)[0] - m.observe(sm)[0]) / (2 * eps)
+        np.testing.assert_allclose(H_a, H_n, atol=1e-5)
 
-        np.testing.assert_allclose(H_analytic, H_numeric, atol=1e-5)
-
-
-# --------------------------------------------------------------------------- #
-# CellTowerConfig — position
-# --------------------------------------------------------------------------- #
-
-class TestCellTowerConfigPosition:
-
-    def test_position_type_is_linear(self):
-        cfg = CellTowerConfig(
-            tower_lat=51.5, tower_lon=-0.1,
-            measurement_type="position",
-            position_lat_col="cell_lat",
-            position_lon_col="cell_lon",
-        )
-        cfg.set_reference(51.5, -0.1)
-        # observation_jacobian should be constant (linear sensor via override)
-        state = np.array([100.0, 200.0, 0.0, 0.0])
-        H = cfg.observation_jacobian(state)
-        assert H.shape == (2, 4)
-        assert H[0, 0] == 1.0
-        assert H[1, 1] == 1.0
+    def test_n_obs(self):
+        assert self._model().n_obs == 1
 
 
 # --------------------------------------------------------------------------- #
-# CustomSensorConfig
+# ObservationModel — CallableModel
 # --------------------------------------------------------------------------- #
 
-class TestCustomSensorConfig:
+class TestCallableModel:
 
-    def test_linear_custom_sensor(self):
+    def test_linear_via_matrix(self):
         H = np.array([[1.0, 0.0, 0.0, 0.0]])
-        cfg = CustomSensorConfig(
-            name="x_only",
-            sensor_type_tag="x_pos",
-            observation_matrix_val=H,
-            default_covariance=np.array([[25.0]]),
-            timestamp_col="ts",
-            value_cols=["x_m"],
-        )
+        m = CallableModel(observation_matrix_val=H, default_cov=np.array([[25.0]]))
         state = np.array([42.0, 10.0, 1.0, 0.5])
-        assert cfg.observe(state)[0] == pytest.approx(42.0)
-        np.testing.assert_array_equal(cfg.observation_jacobian(state), H)
+        assert m.observe(state)[0] == pytest.approx(42.0)
+        np.testing.assert_array_equal(m.jacobian(state), H)
 
-    def test_nonlinear_custom_sensor(self):
+    def test_nonlinear_callable(self):
         def obs(s): return np.array([np.sqrt(s[0]**2 + s[1]**2)])
         def jac(s):
             d = max(np.sqrt(s[0]**2 + s[1]**2), 1e-6)
             return np.array([[s[0]/d, s[1]/d, 0., 0.]])
-
-        cfg = CustomSensorConfig(
-            name="range_from_origin",
-            sensor_type_tag="range_origin",
-            observe_fn=obs,
-            jacobian_fn=jac,
-            default_covariance=np.array([[100.0]]),
-            timestamp_col="ts",
-            value_cols=["range_m"],
-        )
+        m = CallableModel(observe_fn=obs, jacobian_fn=jac,
+                          _n_obs=1, default_cov=np.array([[100.0]]))
         state = np.array([30.0, 40.0, 0.0, 0.0])
-        assert cfg.observe(state)[0] == pytest.approx(50.0)
+        assert m.observe(state)[0] == pytest.approx(50.0)
 
-    def test_measurement_from_row(self):
-        cfg = CustomSensorConfig(
-            name="baro",
-            sensor_type_tag="baro",
-            observation_matrix_val=np.array([[0., 1., 0., 0.]]),
+    def test_requires_either_observe_or_matrix(self):
+        with pytest.raises(ValueError):
+            CallableModel(default_cov=np.eye(1))
+
+
+# --------------------------------------------------------------------------- #
+# SensorFactory
+# --------------------------------------------------------------------------- #
+
+class TestSensorFactory:
+
+    def test_fixed_point_creates_config(self):
+        cfg = SensorFactory.fixed_point(lat=51.5, lon=-0.1, uncertainty_m=30.0,
+                                         name="cam_1")
+        assert isinstance(cfg, GenericSensorConfig)
+        assert cfg.name == "cam_1"
+        assert isinstance(cfg.model, FixedPointModel)
+
+    def test_range_sensor_creates_config(self):
+        cfg = SensorFactory.range_sensor(lat=51.5, lon=-0.1, range_std_m=200.0,
+                                          name="tower_1")
+        assert isinstance(cfg, GenericSensorConfig)
+        assert isinstance(cfg.model, RangeModel)
+
+    def test_bearing_sensor_creates_config(self):
+        cfg = SensorFactory.bearing_sensor(lat=51.5, lon=-0.1, angle_std_rad=0.1,
+                                            name="aoa_1")
+        assert isinstance(cfg, GenericSensorConfig)
+        assert isinstance(cfg.model, BearingModel)
+
+    def test_callable_sensor_creates_config(self):
+        H = np.array([[0., 1., 0., 0.]])
+        cfg = SensorFactory.callable_sensor(
+            observe_fn=None,
+            observation_matrix=H,
             default_covariance=np.array([[4.0]]),
-            timestamp_col="ts",
-            value_cols=["alt_m"],
+            value_extractor=lambda row: np.array([row["alt"]]),
+            name="baro",
         )
-        row = pd.Series({"ts": pd.Timestamp("2024-01-01", tz="UTC"), "alt_m": 55.0})
-        m = cfg.measurement_from_row(row)
-        assert m.values[0] == pytest.approx(55.0)
-        assert m.covariance[0, 0] == pytest.approx(4.0)
+        assert isinstance(cfg, GenericSensorConfig)
+        assert isinstance(cfg.model, CallableModel)
 
-    def test_requires_observe_or_matrix(self):
-        with pytest.raises(ValueError, match="observe_fn"):
-            CustomSensorConfig(
-                name="bad",
-                sensor_type_tag="bad",
-                default_covariance=np.eye(1),
-                value_cols=["x"],
+    def test_sensor_tag_defaults_to_name(self):
+        cfg = SensorFactory.fixed_point(lat=51.5, lon=-0.1, name="gate_A")
+        assert cfg.sensor_tag == "gate_A"
+
+    def test_sensor_tag_override(self):
+        cfg = SensorFactory.fixed_point(lat=51.5, lon=-0.1,
+                                         name="gate_A", sensor_tag="rfid")
+        assert cfg.sensor_tag == "rfid"
+
+    def test_register_and_create(self):
+        @SensorFactory.register("test_ble")
+        def _ble(lat, lon, **kwargs):
+            return SensorFactory.range_sensor(
+                lat, lon, rssi_at_1m=-59, path_loss_exponent=2.0, **kwargs
             )
+
+        cfg = SensorFactory.create("test_ble", lat=51.5, lon=-0.1,
+                                    name="beacon_1")
+        assert isinstance(cfg.model, RangeModel)
+        assert cfg.model.rssi_at_1m == pytest.approx(-59.0)
+
+    def test_create_unknown_type_raises(self):
+        with pytest.raises(KeyError, match="Unknown sensor type"):
+            SensorFactory.create("does_not_exist")
+
+    def test_registered_types_includes_builtins(self):
+        types = SensorFactory.registered_types()
+        assert "fixed_point" in types
+        assert "range" in types
+        assert "bearing" in types
+        assert "callable" in types
+
+    def test_fixed_point_measurement_from_row(self):
+        cfg = SensorFactory.fixed_point(lat=LAT_REF, lon=LON_REF,
+                                         uncertainty_m=20.0, name="cam")
+        cfg.set_reference(LAT_REF, LON_REF)
+        row = pd.Series({"timestamp": pd.Timestamp("2024-01-01", tz="UTC")})
+        m = cfg.measurement_from_row(row)
+        # sensor at reference → Cartesian (0, 0)
+        assert m.values[0] == pytest.approx(0.0, abs=1e-6)
+        assert m.values[1] == pytest.approx(0.0, abs=1e-6)
+        assert m.covariance[0, 0] == pytest.approx(400.0)
+
+    def test_range_sensor_measurement_from_rssi(self):
+        cfg = SensorFactory.range_sensor(lat=LAT_REF, lon=LON_REF,
+                                          rssi_at_1m=-40.0,
+                                          path_loss_exponent=2.0,
+                                          name="tower")
+        cfg.set_reference(LAT_REF, LON_REF)
+        row = pd.Series({
+            "timestamp": pd.Timestamp("2024-01-01", tz="UTC"),
+            "rssi_dbm": -60.0,   # → 10 m
+        })
+        m = cfg.measurement_from_row(row)
+        assert m.values[0] == pytest.approx(10.0, rel=0.01)
+
+    def test_sensor_type_tag_in_measurement(self):
+        cfg = SensorFactory.fixed_point(lat=LAT_REF, lon=LON_REF, name="entrance_cam")
+        cfg.set_reference(LAT_REF, LON_REF)
+        row = pd.Series({"timestamp": pd.Timestamp("2024-01-01", tz="UTC")})
+        m = cfg.measurement_from_row(row)
+        assert m.sensor_type == "entrance_cam"
+
+    def test_bearing_sensor_measurement_from_row(self):
+        cfg = SensorFactory.bearing_sensor(lat=LAT_REF, lon=LON_REF,
+                                            angle_col="bearing",
+                                            name="aoa")
+        cfg.set_reference(LAT_REF, LON_REF)
+        row = pd.Series({
+            "timestamp": pd.Timestamp("2024-01-01", tz="UTC"),
+            "bearing": 1.57,
+        })
+        m = cfg.measurement_from_row(row)
+        assert m.values[0] == pytest.approx(1.57)
 
 
 # --------------------------------------------------------------------------- #
@@ -325,138 +325,108 @@ class TestSensorFuser:
 
     def test_gps_only_fusion(self):
         meas, cfg = _gps_stream(n=15)
-        stream = [(m, cfg) for m in meas]
-        fuser = SensorFuser()
-        result = fuser.run(stream, lat_ref=LAT_REF, lon_ref=LON_REF)
+        result = SensorFuser().run([(m, cfg) for m in meas],
+                                   lat_ref=LAT_REF, lon_ref=LON_REF)
         assert result.n_steps == 15
 
-    def test_result_columns(self):
+    def test_result_to_dataframe_columns(self):
         meas, cfg = _gps_stream(n=10)
-        stream = [(m, cfg) for m in meas]
-        result = SensorFuser().run(stream, lat_ref=LAT_REF, lon_ref=LON_REF)
+        result = SensorFuser().run([(m, cfg) for m in meas],
+                                   lat_ref=LAT_REF, lon_ref=LON_REF)
         df = result.to_dataframe()
         for col in ("filtered_lat", "filtered_lon", "filtered_vx_ms",
-                    "filtered_vy_ms", "pos_uncertainty_x_m"):
+                    "filtered_vy_ms", "sensor_type"):
             assert col in df.columns
 
-    def test_empty_stream_returns_empty_result(self):
+    def test_empty_stream(self):
         result = SensorFuser().run([], lat_ref=LAT_REF, lon_ref=LON_REF)
         assert result.n_steps == 0
 
-    def test_gps_plus_capture_recapture(self):
+    def test_gps_plus_fixed_point(self):
         rng = np.random.default_rng(42)
         df = make_gps_df(n=20, rng=rng)
         gps_cfg = GPSConfig(lat_ref=None, lon_ref=None)
         gps_meas = gps_cfg.measurements_from_df(df, auto_ref=True)
+        lat_ref, lon_ref = gps_cfg.lat_ref, gps_cfg.lon_ref
 
-        lat_ref = gps_cfg.lat_ref
-        lon_ref = gps_cfg.lon_ref
+        cam = SensorFactory.fixed_point(lat=lat_ref, lon=lon_ref,
+                                         uncertainty_m=25.0, name="cam_1")
+        cam.set_reference(lat_ref, lon_ref)
+        cr_row = pd.Series({"timestamp": df["timestamp"].iloc[10]})
+        cr_meas = cam.measurement_from_row(cr_row)
 
-        cr_cfg = CaptureRecaptureConfig(
-            reader_lat=lat_ref, reader_lon=lon_ref,
-            detection_radius_m=25.0,
-        )
-        cr_cfg.set_reference(lat_ref, lon_ref)
-
-        # One CR event at the midpoint of the trajectory
-        mid_ts = df["timestamp"].iloc[10]
-        cr_row = pd.Series({"timestamp": mid_ts})
-        cr_meas = cr_cfg.measurement_from_row(cr_row)
-
-        stream = [(m, gps_cfg) for m in gps_meas] + [(cr_meas, cr_cfg)]
+        stream = [(m, gps_cfg) for m in gps_meas] + [(cr_meas, cam)]
         result = SensorFuser().run(stream, lat_ref=lat_ref, lon_ref=lon_ref)
-
-        # 20 GPS + 1 CR = 21 steps
         assert result.n_steps == 21
-        assert "capture_recapture" in result.sensor_types()
+        assert "cam_1" in result.sensor_types()
 
-    def test_gps_plus_cell_tower_range(self):
+    def test_gps_plus_range_sensor(self):
         rng = np.random.default_rng(7)
         df = make_gps_df(n=15, rng=rng)
         gps_cfg = GPSConfig(lat_ref=None, lon_ref=None)
         gps_meas = gps_cfg.measurements_from_df(df, auto_ref=True)
+        lat_ref, lon_ref = gps_cfg.lat_ref, gps_cfg.lon_ref
 
-        lat_ref = gps_cfg.lat_ref
-        lon_ref = gps_cfg.lon_ref
-
-        tower_cfg = CellTowerConfig(
-            tower_lat=lat_ref + 0.01,
-            tower_lon=lon_ref + 0.01,
-            measurement_type="range",
-            range_std_m=300.0,
+        tower = SensorFactory.range_sensor(
+            lat=lat_ref + 0.01, lon=lon_ref + 0.01,
+            range_std_m=300.0, name="tower_1"
         )
-        tower_cfg.set_reference(lat_ref, lon_ref)
+        tower.set_reference(lat_ref, lon_ref)
 
-        # Tower measurement at every GPS timestamp
+        from kalmangps.sensors.generic import GenericMeasurement, _measurement_class
         tower_meas = []
         for m in gps_meas:
-            # True range from GPS position to tower
-            tx, ty = tower_cfg._tower_x_m, tower_cfg._tower_y_m
+            tx = tower.model._x_m
+            ty = tower.model._y_m
             true_range = np.sqrt((m.values[0] - tx)**2 + (m.values[1] - ty)**2)
-            from kalmangps.sensors.cell_tower import CellTowerMeasurement
-            tm = CellTowerMeasurement(
+            cls = _measurement_class("tower_1")
+            tm = cls(
                 timestamp=m.timestamp,
                 values=np.array([true_range]),
                 covariance=np.array([[300.0**2]]),
-                tower_lat=tower_cfg.tower_lat,
-                tower_lon=tower_cfg.tower_lon,
-                measurement_type="range",
             )
             tower_meas.append(tm)
 
-        stream = (
-            [(m, gps_cfg) for m in gps_meas]
-            + [(m, tower_cfg) for m in tower_meas]
-        )
+        stream = ([(m, gps_cfg) for m in gps_meas]
+                  + [(m, tower) for m in tower_meas])
         result = SensorFuser().run(stream, lat_ref=lat_ref, lon_ref=lon_ref)
         assert result.n_steps == 30
-        assert "cell_tower" in result.sensor_types()
+        assert "tower_1" in result.sensor_types()
 
     def test_fused_position_close_to_gps(self):
-        """Fused GPS+CR result should still be close to raw GPS fixes."""
         rng = np.random.default_rng(1)
         df = make_gps_df(n=20, rng=rng)
         gps_cfg = GPSConfig(lat_ref=None, lon_ref=None)
         gps_meas = gps_cfg.measurements_from_df(df, auto_ref=True)
         lat_ref, lon_ref = gps_cfg.lat_ref, gps_cfg.lon_ref
 
-        cr_cfg = CaptureRecaptureConfig(
-            reader_lat=lat_ref, reader_lon=lon_ref,
-            detection_radius_m=100.0,
+        cam = SensorFactory.fixed_point(lat=lat_ref, lon=lon_ref,
+                                         uncertainty_m=100.0, name="cam")
+        cam.set_reference(lat_ref, lon_ref)
+        cr_meas = cam.measurement_from_row(
+            pd.Series({"timestamp": df["timestamp"].iloc[5]})
         )
-        cr_cfg.set_reference(lat_ref, lon_ref)
-        cr_row = pd.Series({"timestamp": df["timestamp"].iloc[5]})
-        cr_meas = cr_cfg.measurement_from_row(cr_row)
 
-        stream = [(m, gps_cfg) for m in gps_meas] + [(cr_meas, cr_cfg)]
+        stream = [(m, gps_cfg) for m in gps_meas] + [(cr_meas, cam)]
         result = SensorFuser().run(stream, lat_ref=lat_ref, lon_ref=lon_ref)
-
         gps_steps = result.at_sensor("gps")
         raw_xy = np.stack([m.values for m in gps_meas])
         fused_xy = np.stack([s.position_xy() for s in gps_steps])
         dists = np.linalg.norm(fused_xy - raw_xy, axis=1)
-        assert np.mean(dists) < 100.0  # within 100 m on average
+        assert np.mean(dists) < 100.0
 
-    def test_sensor_types_method(self):
-        meas, cfg = _gps_stream(n=8)
-        stream = [(m, cfg) for m in meas]
+    def test_unsorted_stream_sorted_internally(self):
+        meas, cfg = _gps_stream(n=10)
+        stream = list(reversed([(m, cfg) for m in meas]))
         result = SensorFuser().run(stream, lat_ref=LAT_REF, lon_ref=LON_REF)
-        assert result.sensor_types() == {"gps"}
+        ts = [s.timestamp for s in result.steps]
+        assert ts == sorted(ts)
 
     def test_at_sensor_filter(self):
         meas, cfg = _gps_stream(n=10)
-        stream = [(m, cfg) for m in meas]
-        result = SensorFuser().run(stream, lat_ref=LAT_REF, lon_ref=LON_REF)
-        gps_steps = result.at_sensor("gps")
-        assert len(gps_steps) == 10
-
-    def test_unsorted_stream_gets_sorted(self):
-        """Fuser should sort the input stream before processing."""
-        meas, cfg = _gps_stream(n=10)
-        stream = [(m, cfg) for m in reversed(meas)]  # reversed order
-        result = SensorFuser().run(stream, lat_ref=LAT_REF, lon_ref=LON_REF)
-        timestamps = [s.timestamp for s in result.steps]
-        assert timestamps == sorted(timestamps)
+        result = SensorFuser().run([(m, cfg) for m in meas],
+                                   lat_ref=LAT_REF, lon_ref=LON_REF)
+        assert len(result.at_sensor("gps")) == 10
 
 
 # --------------------------------------------------------------------------- #
@@ -465,26 +435,22 @@ class TestSensorFuser:
 
 class TestSensorFusionPipeline:
 
-    def _make_pipeline(self, **kw):
+    def _pipeline(self, **kw):
         return SensorFusionPipeline(
-            sensors={"gps": GPSConfig(lat_col="lat", lon_col="lon",
-                                       accuracy_col="accuracy",
-                                       timestamp_col="timestamp")},
+            sensors={"gps": GPSConfig()},
             primary_sensor="gps",
             **kw,
         )
 
-    def test_gps_only_pipeline(self):
-        rng = np.random.default_rng(0)
-        df = make_gps_df(n=20, rng=rng)
-        result = self._make_pipeline().run(df)
+    def test_gps_only(self):
+        df = make_gps_df(n=20)
+        result = self._pipeline().run(df)
         assert result.n_segments == 1
         assert result.n_steps == 20
 
-    def test_to_dataframe_has_required_columns(self):
-        rng = np.random.default_rng(1)
-        df = make_gps_df(n=15, rng=rng)
-        out = self._make_pipeline().run(df).to_dataframe()
+    def test_to_dataframe_columns(self):
+        df = make_gps_df(n=15)
+        out = self._pipeline().run(df).to_dataframe()
         for col in ("filtered_lat", "filtered_lon", "sensor_type", "timestamp"):
             assert col in out.columns
 
@@ -493,134 +459,129 @@ class TestSensorFusionPipeline:
         df1 = make_gps_df(n=12, trip_id="A", rng=rng)
         df2 = make_gps_df(n=10, trip_id="B", start_lat=48.8, start_lon=2.3, rng=rng)
         df = pd.concat([df1, df2], ignore_index=True)
-
         pipeline = SensorFusionPipeline(
             sensors={"gps": GPSConfig()},
             primary_sensor="gps",
             group_col="trip_id",
         )
-        result = pipeline.run(df)
-        assert result.n_segments == 2
+        assert pipeline.run(df).n_segments == 2
 
     def test_time_gap_splitting(self):
         rng = np.random.default_rng(3)
         early = make_gps_df(n=8, rng=rng, start_time="2024-01-01 08:00:00")
-        late = make_gps_df(n=8, rng=rng, start_time="2024-01-01 11:00:00")
+        late  = make_gps_df(n=8, rng=rng, start_time="2024-01-01 11:00:00")
         df = pd.concat([early, late], ignore_index=True)
-
         pipeline = SensorFusionPipeline(
             sensors={"gps": GPSConfig()},
             primary_sensor="gps",
             max_time_gap="5 min",
         )
-        result = pipeline.run(df)
-        assert result.n_segments == 2
+        assert pipeline.run(df).n_segments == 2
 
-    def test_with_capture_recapture(self):
+    def test_with_fixed_point_camera(self):
         rng = np.random.default_rng(4)
         gps_df = make_gps_df(n=15, rng=rng)
-
-        # One CR event in the middle of the trajectory
         mid_ts = gps_df["timestamp"].iloc[7]
-        cr_df = pd.DataFrame({
-            "timestamp": [mid_ts],
-            "reader_id": ["gate_1"],
-        })
-
-        # Reader at approximately the same location as the GPS track
-        first_lat = float(gps_df["lat"].iloc[0])
-        first_lon = float(gps_df["lon"].iloc[0])
+        cam_df = pd.DataFrame({"timestamp": [mid_ts]})
 
         pipeline = SensorFusionPipeline(
             sensors={
                 "gps": GPSConfig(),
-                "gate_1": CaptureRecaptureConfig(
-                    reader_lat=first_lat,
-                    reader_lon=first_lon,
-                    detection_radius_m=50.0,
+                "entrance_cam": SensorFactory.fixed_point(
+                    lat=float(gps_df["lat"].iloc[0]),
+                    lon=float(gps_df["lon"].iloc[0]),
+                    uncertainty_m=50.0,
+                    name="entrance_cam",
                 ),
             },
             primary_sensor="gps",
         )
-        result = pipeline.run(gps_df, secondary_dfs={"gate_1": cr_df})
+        result = pipeline.run(gps_df, secondary_dfs={"entrance_cam": cam_df})
         assert result.n_segments == 1
-        # 15 GPS + 1 CR = 16 steps
-        assert result.n_steps == 16
-        sensor_types = result.segment_results[0].fused.sensor_types()
-        assert "capture_recapture" in sensor_types
+        assert result.n_steps == 16  # 15 GPS + 1 camera
+        assert "entrance_cam" in result.segment_results[0].fused.sensor_types()
 
-    def test_with_cell_tower(self):
+    def test_with_range_sensor(self):
         rng = np.random.default_rng(5)
         gps_df = make_gps_df(n=12, rng=rng)
         lat0 = float(gps_df["lat"].iloc[0])
         lon0 = float(gps_df["lon"].iloc[0])
-
-        # Tower 500 m north
-        tower_lat = lat0 + 0.005
-        tower_lon = lon0
-
         tower_df = pd.DataFrame({
             "timestamp": gps_df["timestamp"].values,
             "rssi_dbm": np.full(12, -70.0),
         })
-
         pipeline = SensorFusionPipeline(
             sensors={
                 "gps": GPSConfig(),
-                "tower_1": CellTowerConfig(
-                    tower_lat=tower_lat, tower_lon=tower_lon,
-                    measurement_type="range",
-                    range_std_m=500.0,
+                "tower_1": SensorFactory.range_sensor(
+                    lat=lat0 + 0.005, lon=lon0, range_std_m=500.0, name="tower_1"
                 ),
             },
             primary_sensor="gps",
         )
         result = pipeline.run(gps_df, secondary_dfs={"tower_1": tower_df})
-        assert result.n_segments == 1
-        assert result.n_steps == 24  # 12 GPS + 12 tower
+        assert result.n_steps == 24
 
     def test_secondary_outside_window_excluded(self):
-        """Secondary measurements outside the GPS segment window are dropped."""
         rng = np.random.default_rng(6)
         gps_df = make_gps_df(n=10, start_time="2024-01-01 12:00:00", rng=rng)
-
-        # CR event 3 hours before the GPS segment
-        far_ts = pd.Timestamp("2024-01-01 09:00:00", tz="UTC")
-        cr_df = pd.DataFrame({"timestamp": [far_ts]})
-
-        first_lat = float(gps_df["lat"].iloc[0])
-        first_lon = float(gps_df["lon"].iloc[0])
-
+        far_df = pd.DataFrame({
+            "timestamp": [pd.Timestamp("2024-01-01 09:00:00", tz="UTC")]
+        })
         pipeline = SensorFusionPipeline(
             sensors={
                 "gps": GPSConfig(),
-                "reader": CaptureRecaptureConfig(
-                    reader_lat=first_lat, reader_lon=first_lon,
-                    detection_radius_m=30.0,
+                "gate": SensorFactory.fixed_point(
+                    lat=float(gps_df["lat"].iloc[0]),
+                    lon=float(gps_df["lon"].iloc[0]),
+                    uncertainty_m=30.0, name="gate",
                 ),
             },
             primary_sensor="gps",
         )
-        result = pipeline.run(gps_df, secondary_dfs={"reader": cr_df})
-        # Only GPS steps — CR was out of window
-        assert result.n_steps == 10
+        result = pipeline.run(gps_df, secondary_dfs={"gate": far_df})
+        assert result.n_steps == 10  # only GPS
+
+    def test_callable_sensor_via_factory(self):
+        """Verify that a callable_sensor integrates end-to-end."""
+        rng = np.random.default_rng(8)
+        gps_df = make_gps_df(n=10, rng=rng)
+        # Fake a "north position" sensor that measures y directly
+        H = np.array([[0., 1., 0., 0.]])
+        north_df = pd.DataFrame({
+            "timestamp": gps_df["timestamp"].values,
+            "north_m": np.random.default_rng(9).normal(0, 5, 10),
+        })
+        pipeline = SensorFusionPipeline(
+            sensors={
+                "gps": GPSConfig(),
+                "north_sensor": SensorFactory.callable_sensor(
+                    observe_fn=None,
+                    observation_matrix=H,
+                    default_covariance=np.array([[25.0]]),
+                    value_extractor=lambda row: np.array([float(row["north_m"])]),
+                    name="north_sensor",
+                ),
+            },
+            primary_sensor="gps",
+        )
+        result = pipeline.run(gps_df, secondary_dfs={"north_sensor": north_df})
+        assert result.n_steps == 20
 
     def test_empty_primary_df(self):
         empty = pd.DataFrame(columns=["timestamp", "lat", "lon", "accuracy"])
-        result = self._make_pipeline().run(empty)
+        result = self._pipeline().run(empty)
         assert result.n_segments == 0
 
-    def test_invalid_primary_sensor_key(self):
+    def test_invalid_primary_sensor_raises(self):
         with pytest.raises(ValueError, match="primary_sensor"):
             SensorFusionPipeline(
                 sensors={"gps": GPSConfig()},
                 primary_sensor="nonexistent",
             )
 
-    def test_fused_pipeline_result_to_dataframe(self):
-        rng = np.random.default_rng(9)
-        df = make_gps_df(n=12, rng=rng)
-        result = self._make_pipeline().run(df)
-        out = result.to_dataframe()
-        assert len(out) == 12
+    def test_result_to_dataframe_finite(self):
+        df = make_gps_df(n=12)
+        out = self._pipeline().run(df).to_dataframe()
         assert np.isfinite(out["filtered_lat"]).all()
+        assert np.isfinite(out["filtered_lon"]).all()
