@@ -67,7 +67,8 @@ async def run_pipeline(
         raise HTTPException(422, f"Pipeline error: {exc}") from exc
 
     out = result.to_dataframe()
-    # Replace NaN/NaT with None so JSON serialisation doesn't break
+    # Replace NaN/NaT/inf/-inf with None so JSON serialisation doesn't break
+    out = out.replace([float('inf'), float('-inf')], None)
     out = out.where(out.notna(), other=None)
 
     return {
