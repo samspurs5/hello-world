@@ -51,7 +51,7 @@ async def run_pipeline(
     pipeline = GPSKalmanPipeline(
         gps_config=gps_config,
         group_col=cfg.get("group_col") or None,
-        max_time_gap=float(cfg.get("max_time_gap", 300)),
+        max_time_gap=f"{cfg.get('max_time_gap', 300)}s",
         min_segment_length=int(cfg.get("min_segment_length", 3)),
     )
 
