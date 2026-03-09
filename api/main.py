@@ -41,11 +41,17 @@ async def run_pipeline(
     except json.JSONDecodeError as exc:
         raise HTTPException(400, f"Invalid config JSON: {exc}") from exc
 
+    # Drop rows flagged as outliers before filtering
+    outlier_col = cfg.get("outlier_col") or None
+    if outlier_col and outlier_col in df.columns:
+        df = df[~df[outlier_col].astype(str).str.upper().isin({"TRUE", "1", "YES"})]
+
     gps_config = GPSConfig(
         lat_col=cfg.get("lat_col", "lat"),
         lon_col=cfg.get("lon_col", "lon"),
-        accuracy_col=cfg.get("accuracy_col", "accuracy_m"),
+        accuracy_col=cfg.get("accuracy_col") or None,
         timestamp_col=cfg.get("timestamp_col", "timestamp"),
+        default_accuracy_m=float(cfg.get("default_accuracy_m", 10.0)),
     )
 
     pipeline = GPSKalmanPipeline(

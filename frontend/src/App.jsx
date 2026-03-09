@@ -7,9 +7,11 @@ const COLORS = ['#e63946', '#2a9d8f', '#e9c46a', '#f4a261', '#a8dadc', '#7400b8'
 const DEFAULTS = {
   lat_col: 'lat',
   lon_col: 'lon',
-  accuracy_col: 'accuracy_m',
+  accuracy_col: '',
   timestamp_col: 'timestamp',
   group_col: '',
+  outlier_col: '',
+  default_accuracy_m: '10',
   max_time_gap: '300',
   min_segment_length: '3',
 }
@@ -81,9 +83,10 @@ export default function App() {
           {[
             ['lat_col',       'Latitude column'],
             ['lon_col',       'Longitude column'],
-            ['accuracy_col',  'Accuracy column (m)'],
+            ['accuracy_col',  'Accuracy column (m, optional)'],
             ['timestamp_col', 'Timestamp column'],
             ['group_col',     'Group column (optional)'],
+            ['outlier_col',   'Outlier flag column (optional)'],
           ].map(([name, label]) => (
             <label key={name}>
               <div style={S.label}>{label}</div>
@@ -91,6 +94,10 @@ export default function App() {
             </label>
           ))}
 
+          <label>
+            <div style={S.label}>Default accuracy (m, when no column)</div>
+            <input type="number" value={cfg.default_accuracy_m} onChange={set('default_accuracy_m')} style={S.input} />
+          </label>
           <label>
             <div style={S.label}>Max time gap (s)</div>
             <input type="number" value={cfg.max_time_gap} onChange={set('max_time_gap')} style={S.input} />
