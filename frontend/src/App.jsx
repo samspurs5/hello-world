@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { MapContainer, TileLayer, Polyline, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, Polyline, CircleMarker, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 
 const COLORS = ['#e63946', '#2a9d8f', '#e9c46a', '#f4a261', '#a8dadc', '#7400b8']
@@ -128,6 +128,7 @@ export default function App() {
               return [
                 <LegendRow key={`raw-${i}`} color="#000000" dashed label={`${label} · raw`} />,
                 <LegendRow key={`filtered-${i}`} color={color} label={`${label} · Kalman`} />,
+                <LegendRow key={`dots-${i}`} color="#000000" dot label={`${label} · observations`} />,
               ]
             })}
           </div>
@@ -153,6 +154,14 @@ export default function App() {
               positions={seg.raw}
               pathOptions={{ color: '#000000', weight: 1.5, dashArray: '6 5', opacity: 0.8 }}
             />,
+            ...seg.raw.map((pos, j) => (
+              <CircleMarker
+                key={`dot-${i}-${j}`}
+                center={pos}
+                radius={3}
+                pathOptions={{ color: '#000', fillColor: '#000', fillOpacity: 0.7, weight: 0 }}
+              />
+            )),
           ]
         })}
         {allCoords.length > 0 && <FitBounds coords={allCoords} />}
@@ -161,16 +170,19 @@ export default function App() {
   )
 }
 
-function LegendRow({ color, dashed, label }) {
+function LegendRow({ color, dashed, dot, label }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
       <svg width="24" height="6">
-        <line
-          x1="0" y1="3" x2="24" y2="3"
-          stroke={color}
-          strokeWidth={dashed ? 1.5 : 3}
-          strokeDasharray={dashed ? '4 3' : undefined}
-        />
+        {dot
+          ? <circle cx="12" cy="3" r="3" fill={color} fillOpacity={0.7} />
+          : <line
+              x1="0" y1="3" x2="24" y2="3"
+              stroke={color}
+              strokeWidth={dashed ? 1.5 : 3}
+              strokeDasharray={dashed ? '4 3' : undefined}
+            />
+        }
       </svg>
       <span>{label}</span>
     </div>
