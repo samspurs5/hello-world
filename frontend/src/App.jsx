@@ -56,7 +56,9 @@ export default function App() {
     fd.append('config', JSON.stringify(cfg))
     try {
       const r = await fetch('/api/run', { method: 'POST', body: fd })
-      const d = await r.json()
+      const text = await r.text()
+      let d
+      try { d = JSON.parse(text) } catch { throw new Error(text.slice(0, 200)) }
       if (!r.ok) throw new Error(d.detail || 'Server error')
       setResult(d)
     } catch (err) {
