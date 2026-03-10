@@ -144,14 +144,14 @@ export default function App() {
           const color = COLORS[i % COLORS.length]
           return [
             <Polyline
-              key={`raw-${i}`}
-              positions={seg.raw}
-              pathOptions={{ color, weight: 1, dashArray: '6 5', opacity: 0.55 }}
-            />,
-            <Polyline
               key={`filtered-${i}`}
               positions={seg.filtered}
               pathOptions={{ color, weight: 3 }}
+            />,
+            <Polyline
+              key={`raw-${i}`}
+              positions={seg.raw}
+              pathOptions={{ color, weight: 1.5, dashArray: '6 5', opacity: 0.8 }}
             />,
           ]
         })}
