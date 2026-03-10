@@ -126,7 +126,7 @@ export default function App() {
               const color = COLORS[i % COLORS.length]
               const label = `Segment ${i + 1}${s.groupKey && s.groupKey !== 'None' ? ` · ${s.groupKey}` : ''}`
               return [
-                <LegendRow key={`raw-${i}`} color={color} dashed label={`${label} · raw`} />,
+                <LegendRow key={`raw-${i}`} color="#000000" dashed label={`${label} · raw`} />,
                 <LegendRow key={`filtered-${i}`} color={color} label={`${label} · Kalman`} />,
               ]
             })}
@@ -151,7 +151,7 @@ export default function App() {
             <Polyline
               key={`raw-${i}`}
               positions={seg.raw}
-              pathOptions={{ color, weight: 1.5, dashArray: '6 5', opacity: 0.8 }}
+              pathOptions={{ color: '#000000', weight: 1.5, dashArray: '6 5', opacity: 0.8 }}
             />,
           ]
         })}
