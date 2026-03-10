@@ -122,14 +122,14 @@ export default function App() {
               ✓ {result.n_segments} segment{result.n_segments !== 1 ? 's' : ''} · {result.n_points} points
             </div>
             <div style={{ color: '#6c7086', marginBottom: 4 }}>Legend</div>
-            <LegendRow color="#6c7086" dashed label="Raw GPS" />
-            {segments.map((s, i) => (
-              <LegendRow
-                key={i}
-                color={COLORS[i % COLORS.length]}
-                label={`Segment ${i + 1}${s.groupKey && s.groupKey !== 'None' ? ` · ${s.groupKey}` : ''}`}
-              />
-            ))}
+            {segments.map((s, i) => {
+              const color = COLORS[i % COLORS.length]
+              const label = `Segment ${i + 1}${s.groupKey && s.groupKey !== 'None' ? ` · ${s.groupKey}` : ''}`
+              return [
+                <LegendRow key={`raw-${i}`} color={color} dashed label={`${label} · raw`} />,
+                <LegendRow key={`filtered-${i}`} color={color} label={`${label} · Kalman`} />,
+              ]
+            })}
           </div>
         )}
       </aside>
@@ -140,18 +140,21 @@ export default function App() {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         />
-        {segments.map((seg, i) => [
-          <Polyline
-            key={`raw-${i}`}
-            positions={seg.raw}
-            pathOptions={{ color: '#6c7086', weight: 1.5, dashArray: '5 5', opacity: 0.7 }}
-          />,
-          <Polyline
-            key={`filtered-${i}`}
-            positions={seg.filtered}
-            pathOptions={{ color: COLORS[i % COLORS.length], weight: 3 }}
-          />,
-        ])}
+        {segments.map((seg, i) => {
+          const color = COLORS[i % COLORS.length]
+          return [
+            <Polyline
+              key={`raw-${i}`}
+              positions={seg.raw}
+              pathOptions={{ color, weight: 1, dashArray: '6 5', opacity: 0.55 }}
+            />,
+            <Polyline
+              key={`filtered-${i}`}
+              positions={seg.filtered}
+              pathOptions={{ color, weight: 3 }}
+            />,
+          ]
+        })}
         {allCoords.length > 0 && <FitBounds coords={allCoords} />}
       </MapContainer>
     </div>
